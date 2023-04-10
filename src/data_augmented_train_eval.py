@@ -19,6 +19,7 @@ import gc
 import json
 import os
 import pickle
+import math
 from absl import app
 from absl import flags
 from absl import logging
@@ -30,16 +31,22 @@ import tensorflow as tf
 from tf_agents.environments import gym_wrapper
 from tf_agents.environments import suite_mujoco
 from tf_agents.environments import tf_py_environment
+from dataset import D4rlDataset, Dataset
+
+# Modular imports
+from actor import Actor
+from policy_utils import D4rlActor
+from policy_utils import estimate_monte_carlo_returns
+from dual_dice import DualDICE
+from model_based import ModelBased
+from q_fitter import QFitter
+from behavior_cloning import BehaviorCloning
 import tqdm
 
-from policy_eval import utils
-from policy_eval.actor import Actor
-from policy_eval.behavior_cloning import BehaviorCloning
-from policy_eval.dataset import D4rlDataset
-from policy_eval.dataset import Dataset
-from policy_eval.dual_dice import DualDICE
-from policy_eval.model_based import ModelBased
-from policy_eval.q_fitter import QFitter
+
+# File imports
+from augment import RotateReflectTranslate
+from utils import check_valid
 
 EPS = np.finfo(np.float32).eps
 FLAGS = flags.FLAGS
@@ -80,6 +87,91 @@ flags.DEFINE_enum('algo', 'fqe', ['fqe', 'dual_dice', 'mb', 'iw', 'dr'],
                   'Algorithm for policy evaluation.')
 flags.DEFINE_float('noise_scale', 0.25, 'Noise scaling for data augmentation.')
 
+# Additional flags for augmented dataset
+flags.DEFINE_float('aug_ratio', 1.0, 'Ratio of augmented data to original data.')
+flags.DEFINE_bool('augment_data', False, 'Whether to augment data.')
+flags.DEFINE_bool('save_dataset', False, 'Whether to save augmented dataset.')
+
+
+def append_data(data, state, action, reward, next_state, done):
+    data['observations'].append(state)
+    data['next_observations'].append(next_state)
+    data['actions'].append(action)
+    data['rewards'].append(reward)
+    data['terminals'].append(done)
+
+def augment_dataset(behavior_dataset, aug_ratio, env_name='PushBallToGoal-v0'):
+    # n = observed_dataset['observations'].shape[0]
+    n = behavior_dataset.states.shape[0]
+    env = gym.make(env_name)
+    f = RotateReflectTranslate(env=None)
+
+    # Create augmented buffer
+    # aug_dataset = {'observations': [], 'next_observations': [], 'actions': [], 'rewards': [], 'terminals': [], 'truncated': [],}
+    aug_dataset = {'states': [], 'next_states': [], 'actions': [], 'rewards': [], 'masks': []}
+    aug_count = 0
+    invalid_count = 0
+    i = 0
+    while aug_count < math.floor(n*aug_ratio):
+        for _ in range(aug_ratio):
+            idx = i%n
+            # Convert eager tensors to numpy
+            behavior_states_np = behavior_dataset.states[idx].numpy()
+            behavior_next_states_np = behavior_dataset.next_states[idx].numpy()
+            behavior_actions_np = behavior_dataset.actions[idx].numpy()
+            behavior_rewards_np = behavior_dataset.rewards[idx].numpy()
+            behavior_masks_np = behavior_dataset.masks[idx].numpy()
+            aug_obs, aug_next_obs, aug_action, aug_reward, aug_done = f.augment(
+                behavior_states_np,
+                behavior_next_states_np,
+                behavior_actions_np,
+                behavior_rewards_np,
+                1-behavior_masks_np
+            )
+            i += 1
+
+            ###### Check if action is valid? ######
+            # if aug_obs is not None and aug_action:
+            if aug_action not in env.action_space:
+              print('ERROR ACTION\n')
+            if aug_obs is not None and aug_action in env.action_space:
+                is_valid = check_valid(env=env, aug_obs=[aug_obs], aug_action=[aug_action], aug_reward=[aug_reward], aug_next_obs=[aug_next_obs])
+                if is_valid:
+                    aug_count += 1
+                    # aug_dataset['observations'].append(aug_obs)
+                    aug_dataset['states'].append(aug_obs)
+                    # aug_dataset['next_observations'].append(aug_next_obs)
+                    aug_dataset['next_states'].append(aug_next_obs)
+                    aug_dataset['actions'].append(aug_action)
+                    aug_dataset['rewards'].append(aug_reward)
+                    # aug_dataset['terminals'].append(aug_done)
+                    aug_dataset['masks'].append(1-aug_done)
+                    print(f'Augmented {aug_count} times')
+                else:
+                    invalid_count += 1
+            if aug_count >= n*aug_ratio:
+                break
+    print(f'Invalid Count: {invalid_count}')
+    combined_dataset = {}
+    import pprint
+    pprint.pprint(vars(behavior_dataset))
+    for key in aug_dataset.keys():
+      print(f'Key: {key}')
+      print(f' Shapes {getattr(behavior_dataset,key).shape} {np.array(aug_dataset[key]).shape}')
+    for key in aug_dataset:
+        print(f'Key integrated: {key}')
+        observed = getattr(behavior_dataset, key)
+        augmented = np.array(aug_dataset[key])
+        print(f'Shapes {observed.shape} {augmented.shape}')
+        data=np.concatenate([observed, augmented])
+        data = data.astype(np.bool_) if key in ['terminals','timeouts'] else data.astype(np.float32)
+        combined_dataset[key] = data
+    print(f'Augmented count: {aug_count}')
+    print(f'Augmented dataset size: {len(aug_dataset["observations"])}')
+    print(f'Original dataset size: {len(behavior_dataset["observations"])}')
+    print(f'Combined dataset size: {len(combined_dataset["observations"])}')
+    return combined_dataset
+
 
 def make_hparam_string(json_parameters=None, **hparam_str_dict):
   if json_parameters:
@@ -111,18 +203,24 @@ def main(_):
       gym_env = d4rl_env
     gym_env.seed(FLAGS.seed)
     env = tf_py_environment.TFPyEnvironment(gym_wrapper.GymWrapper(gym_env))
-
     behavior_dataset = D4rlDataset(
         d4rl_env,
         normalize_states=FLAGS.normalize_states,
         normalize_rewards=FLAGS.normalize_rewards,
         noise_scale=FLAGS.noise_scale,
         bootstrap=FLAGS.bootstrap)
+    print(f'States Shape {behavior_dataset.states.shape}')
+    print(f'Actions Shape {behavior_dataset.actions.shape}')
+    print(f'Rewards Shape {behavior_dataset.rewards.shape}')
+
+    if FLAGS.augment_data:
+      print('Initiating Valid Data Augmentations')
+      behavior_dataset = augment_dataset(behavior_dataset, aug_ratio=1, env_name=FLAGS.env_name)
+  
   else:
     env = suite_mujoco.load(FLAGS.env_name)
     env.seed(FLAGS.seed)
     env = tf_py_environment.TFPyEnvironment(env)
-
     data_file_name = os.path.join(FLAGS.data_dir, FLAGS.env_name, '0',
                                   f'dualdice_{FLAGS.behavior_policy_std}.pckl')
     behavior_dataset = Dataset(
@@ -139,46 +237,35 @@ def main(_):
   if FLAGS.d4rl:
     with tf.io.gfile.GFile(FLAGS.d4rl_policy_filename, 'rb') as f:
       policy_weights = pickle.load(f)
-    actor = utils.D4rlActor(env, policy_weights,
+    actor = D4rlActor(env, policy_weights,
                             is_dapg='dapg' in FLAGS.d4rl_policy_filename)
   else:
     actor = Actor(env.observation_spec().shape[0], env.action_spec())
     actor.load_weights(behavior_dataset.model_filename)
 
-  policy_returns = utils.estimate_monte_carlo_returns(env, FLAGS.discount,
+  policy_returns = estimate_monte_carlo_returns(env, FLAGS.discount,
                                                       actor,
                                                       FLAGS.target_policy_std,
                                                       FLAGS.num_mc_episodes)
   logging.info('Estimated Per-Step Average Returns=%f', policy_returns)
 
   if 'fqe' in FLAGS.algo or 'dr' in FLAGS.algo:
-    model = QFitter(env.observation_spec().shape[0],
-                    env.action_spec().shape[0], FLAGS.lr, FLAGS.weight_decay,
-                    FLAGS.tau)
+    model = QFitter(env.observation_spec().shape[0], env.action_spec().shape[0], FLAGS.lr, FLAGS.weight_decay, FLAGS.tau)
   elif 'mb' in FLAGS.algo:
-    model = ModelBased(env.observation_spec().shape[0],
-                       env.action_spec().shape[0], learning_rate=FLAGS.lr,
-                       weight_decay=FLAGS.weight_decay)
+    model = ModelBased(env.observation_spec().shape[0], env.action_spec().shape[0], learning_rate=FLAGS.lr, weight_decay=FLAGS.weight_decay)
   elif 'dual_dice' in FLAGS.algo:
-    model = DualDICE(env.observation_spec().shape[0],
-                     env.action_spec().shape[0], FLAGS.weight_decay)
+    model = DualDICE(env.observation_spec().shape[0], env.action_spec().shape[0], FLAGS.weight_decay)
   if 'iw' in FLAGS.algo or 'dr' in FLAGS.algo:
-    behavior = BehaviorCloning(env.observation_spec().shape[0],
-                               env.action_spec(),
-                               FLAGS.lr, FLAGS.weight_decay)
+    behavior = BehaviorCloning(env.observation_spec().shape[0], env.action_spec(), FLAGS.lr, FLAGS.weight_decay)
 
   @tf.function
   def get_target_actions(states):
-    return actor(
-        tf.cast(behavior_dataset.unnormalize_states(states),
-                env.observation_spec().dtype),
-        std=FLAGS.target_policy_std)[1]
+    return actor(tf.cast(behavior_dataset.unnormalize_states(states), env.observation_spec().dtype), std=FLAGS.target_policy_std)[1]
 
   @tf.function
   def get_target_logprobs(states, actions):
     log_probs = actor(
-        tf.cast(behavior_dataset.unnormalize_states(states),
-                env.observation_spec().dtype),
+        tf.cast(behavior_dataset.unnormalize_states(states), env.observation_spec().dtype),
         actions=actions,
         std=FLAGS.target_policy_std)[2]
     if tf.rank(log_probs) > 1:
@@ -230,28 +317,24 @@ def main(_):
                                               min_state, max_state)
       elif FLAGS.algo in ['dual_dice']:
         pred_returns, pred_ratio = model.estimate_returns(iter(tf_dataset))
-
         tf.summary.scalar('train/pred ratio', pred_ratio, step=i)
       elif 'iw' in FLAGS.algo or 'dr' in FLAGS.algo:
         discount = FLAGS.discount
-        _, behavior_log_probs = behavior(behavior_dataset.states,
-                                         behavior_dataset.actions)
+        _, behavior_log_probs = behavior(behavior_dataset.states, behavior_dataset.actions)
         target_log_probs = get_target_logprobs(behavior_dataset.states,
                                                behavior_dataset.actions)
         offset = 0.0
         rewards = behavior_dataset.rewards
         if 'dr' in FLAGS.algo:
           # Doubly-robust is effectively the same as importance-weighting but
-          # transforming rewards at (s,a) to r(s,a) + gamma * V^pi(s') -
+          # transforming rewards at (s,a) to r/(s,a) + gamma * V^pi(s') -
           # Q^pi(s,a) and adding an offset to each trajectory equal to V^pi(s0).
           offset = model.estimate_returns(behavior_dataset.initial_states,
                                           behavior_dataset.initial_weights,
                                           get_target_actions)
-          q_values = (model(behavior_dataset.states, behavior_dataset.actions) /
-                      (1 - discount))
+          q_values = (model(behavior_dataset.states, behavior_dataset.actions) / (1 - discount))
           n_samples = 10
-          next_actions = [get_target_actions(behavior_dataset.next_states)
-                          for _ in range(n_samples)]
+          next_actions = [get_target_actions(behavior_dataset.next_states) for _ in range(n_samples)]
           next_q_values = sum(
               [model(behavior_dataset.next_states, next_action) / (1 - discount)
                for next_action in next_actions]) / n_samples
