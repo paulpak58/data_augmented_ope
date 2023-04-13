@@ -1,0 +1,21 @@
+# docker.sub
+# starter submit file for CHTC jobs
+
+universe = docker
+docker_image = ubuntu
+
+executable = docker.sh
+arguments = 
+log = docker_test.log
+error = docker_test.err
+output = docker_test.out
+
+# should_transfer_files = YES
+# when_to_transfer_output = ON_EXIT
+transfer_input_files = test.py
+
+request_cpus = 1
+request_memory = 1GB
+request_disk = 1GB
+
+queue 1
