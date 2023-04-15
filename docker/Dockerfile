@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y python3-pip curl unzip \
     libosmesa-dev libglew-dev patchelf libglfw3-dev
 
 # Get git
-RUN apt-get update && apt-get install -y git
+RUN apt-get update && apt-get install -y git vim curl zsh sudo
 
 # Download mujoco
 RUN curl https://www.roboti.us/download/mjpro150_linux.zip --output /tmp/mujoco.zip && \
@@ -42,10 +42,8 @@ RUN git clone https://github.com/Farama-Foundation/d4rl.git && \
 #RUN set -e && set -x
 #RUN python3 -m pip install -r google-research/policy_eval/requirements.txt
 
-
-# Install gym with mujoco
-# RUN pip3 install gym[mujoco]
-# RUN pip3 install -r /tmp/requirements.txt
+# User root
+USER root
 
 # Test the python packages
 RUN python3 -c "import gym; gym.make('Humanoid-v2'); print('done')"
