@@ -12,7 +12,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 RUN apt-get update && apt-get install -y python3-pip curl unzip \
     libosmesa-dev libglew-dev patchelf libglfw3-dev
-RUN apt-get update && apt-get install -y git vim curl zsh sudo wget
+RUN apt-get update && apt-get install -y git vim curl zsh sudo wget tar
 
 # Add new user
 ARG USERNAME=paulpak
@@ -28,7 +28,7 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME
 # User base dir permissions
 RUN usermod -aG sudo $USERNAME
-RUN chmod g+w /root
+#RUN chmod g+w /root
 
 # Set user permissions and environment variables
 USER $USERNAME
@@ -37,7 +37,9 @@ RUN chown $USERNAME:$USERNAME /home/$USERNAME && \
 ENV LD_LIBRARY_PATH /home/$USERNAME/.mujoco/mjpro150/bin
 ENV MUJOCO_PY_MUJOCO_PATH /home/$USERNAME/.mujoco
 ENV MUJOCO_PY_MJKEY_PATH /home/$USERNAME/.mujoco/mjkey.txt
+ENV MUJOCO_PY_MJPRO_PATH /home/$USERNAME/.mujoco/mjpro150
 ENV D4RL_DATASET_DIR /home/$USERNAME/.d4rl
+ENV PYTHONPATH /home/$USERNAME/.local/lib/python3.8/site-packages
 
 # Retrieve mujoco and key
 RUN curl https://www.roboti.us/download/mjpro150_linux.zip --output /tmp/mujoco.zip && \
@@ -51,20 +53,26 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install -r /tmp/requirements.txt
 RUN git clone https://github.com/Farama-Foundation/d4rl.git /home/$USERNAME/d4rl && \
     cd /home/$USERNAME/d4rl && \
-    pip3 install -e . && \
-    chown $USERNAME:$USERNAME /home/$USERNAME/d4rl && \
-    chmod 755 /home/$USERNAME/d4rl
-ENV D4RL_SUPPRESS_IMPORT_ERROR=1
+    pip3 install -e .
 
  # Add to path
-RUN echo 'export PATH="$PATH:/home/$USER/"' >> /home/$USERNAME/.bashrc
-RUN echo 'export PATH="$PATH:/home/$USER/.local/bin"' >> /home/$USERNAME/.bashrc
-RUN echo 'export PATH="$PATH:/home/$USER/d4rl"' >> /home/$USERNAME/.bashrc
-RUN echo 'export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/home/$USER/.mujoco/mjpro150/bin"' >> /home/$USERNAME/.bashrc
-RUN echo 'export MUJOCO_PY_MUJOCO_PATH="/home/$USER/.mujoco"' >> /home/$USERNAME/.bashrc
-RUN echo 'export MUJOCO_PY_MJKEY_PATH="/home/$USER/.mujoco/mjkey.txt"' >>  /home/$USERNAME/.bashrc
-RUN echo 'export D4RL_DATASET_DIR="/home/$USER/.d4rl"' >> /home/$USERNAME/.bashrc
+RUN echo 'export PATH="$PATH:/home/paulpak/"' >> /home/$USERNAME/.bashrc
+RUN echo 'export PATH="$PATH:/home/paulpak/.local/bin"' >> /home/$USERNAME/.bashrc
+RUN echo 'export PATH="$PATH:/home/paulpak/d4rl"' >> /home/$USERNAME/.bashrc
+RUN echo 'export PYTHONPATH="$PYTHONPATH:/home/paulpak/.local/lib/python3.8/site-packages"' >> /home/$USERNAME/.bashrc
+RUN echo 'export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/home/paulpak/.mujoco/mjpro150/bin"' >> /home/$USERNAME/.bashrc
+RUN echo 'export MUJOCO_PY_MUJOCO_PATH="/home/paulpak/.mujoco"' >> /home/$USERNAME/.bashrc
+RUN echo 'export MUJOCO_PY_MJKEY_PATH="/home/paulpak/.mujoco/mjkey.txt"' >>  /home/$USERNAME/.bashrc
+RUN echo 'export MUJOCO_PY_MJPRO_PATH="/home/paulpak/.mujoco/mjpro150"' >> /home/$USERNAME/.bashrc
+RUN echo 'export D4RL_DATASET_DIR="/home/paulpak/.d4rl"' >> /home/$USERNAME/.bashrc
+RUN echo 'export D4RL_SUPPRESS_IMPORT_ERROR=1' >> /home/$USERNAME/.bashrc
 RUN echo 'source ~/.bashrc' >> /home/$USERNAME/.bash_profile
+
+RUN chown -R $USERNAME:$USERNAME /home/$USERNAME && \
+    chmod -R 777 /home/$USERNAME && \
+    chmod -R 777 /home/$USERNAME/d4rl && \
+    chmod -R 777 /home/$USERNAME/.mujoco && \
+    chmod -R 777 /home/$USERNAME/.local
 
 # Test the python packages
 #RUN python3 -c "import gym; gym.make('maze2d-umaze-v1'); print('done')"
